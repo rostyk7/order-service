@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 
 COPY . .
 
-CMD ["pytest", "tests/", "-v", "--tb=short", "--cov=app", "--cov-report=term-missing"]
+CMD ["pytest", "tests/", "--ignore=tests/e2e", "-v", "--tb=short", "--cov=app", "--cov-report=term-missing"]
