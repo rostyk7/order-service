@@ -1,0 +1,120 @@
+services:
+  # ── Order Service infrastructure (always starts) ───────────────────────────
+
+  postgres-orders:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+      POSTGRES_DB: order_service
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_orders_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U orders -d order_service']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-orders:
+    image: redis:7-alpine
+    ports:
+      - '6380:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - '8000:8000'
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orders:orders@postgres-orders:5432/order_service
+      REDIS_HOST: redis-orders
+      REDIS_PORT: 6379
+      PAYMENT_PROVIDER_URL: http://payment-provider:3000
+      SELF_BASE_URL: http://api:8000
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      redis-orders:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orders:orders@postgres-orders:5432/order_service
+      REDIS_HOST: redis-orders
+      REDIS_PORT: 6379
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      redis-orders:
+        condition: service_healthy
+    command: arq app.worker.WorkerSettings
+
+  # ── payment-provider + its infra (opt-in via --profile full) ───────────────
+  #
+  # docker compose up                  → order-service only
+  # docker compose --profile full up   → order-service + payment-provider
+
+  postgres-payment:
+    image: postgres:16-alpine
+    profiles: [full]
+    environment:
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+      POSTGRES_DB: payment_provider
+    ports:
+      - '5434:5432'
+    volumes:
+      - postgres_payment_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U payment -d payment_provider']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-payment:
+    image: redis:7-alpine
+    profiles: [full]
+    ports:
+      - '6381:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  payment-provider:
+    image: ghcr.io/rostyk7/payment-provider:latest
+    profiles: [full]
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgresql://payment:payment@postgres-payment:5432/payment_provider
+      REDIS_HOST: redis-payment
+      REDIS_PORT: 6379
+      MOCK_FAILURE_RATE: '0.2'
+      MOCK_PROCESSING_DELAY_MS: '300'
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      redis-payment:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && node dist/main"
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 3000 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  postgres_orders_data:
+  postgres_payment_data:

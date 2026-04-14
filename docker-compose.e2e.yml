@@ -1,0 +1,116 @@
+services:
+  # ── payment-provider stack ──────────────────────────────────────────────────
+
+  postgres-payment:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+      POSTGRES_DB: payment_provider
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U payment -d payment_provider']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-payment:
+    image: redis:7-alpine
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  payment-provider:
+    image: ghcr.io/rostyk7/payment-provider:latest
+    environment:
+      DATABASE_URL: postgresql://payment:payment@postgres-payment:5432/payment_provider
+      REDIS_HOST: redis-payment
+      REDIS_PORT: 6379
+      MOCK_FAILURE_RATE: '0'          # deterministic — only card token controls outcome
+      MOCK_PROCESSING_DELAY_MS: '100' # fast for tests
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      redis-payment:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && node dist/main"
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z localhost 3000 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── order-service stack ─────────────────────────────────────────────────────
+
+  postgres-orders:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+      POSTGRES_DB: order_service
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U orders -d order_service']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-orders:
+    image: redis:7-alpine
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orders:orders@postgres-orders:5432/order_service
+      REDIS_HOST: redis-orders
+      REDIS_PORT: 6379
+      PAYMENT_PROVIDER_URL: http://payment-provider:3000
+      # Must be reachable by payment-provider within the docker network
+      SELF_BASE_URL: http://api:8000
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      redis-orders:
+        condition: service_healthy
+      payment-provider:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8000/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orders:orders@postgres-orders:5432/order_service
+      REDIS_HOST: redis-orders
+      REDIS_PORT: 6379
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      redis-orders:
+        condition: service_healthy
+    command: arq app.worker.WorkerSettings
+
+  # ── e2e test runner ─────────────────────────────────────────────────────────
+
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      API_BASE_URL: http://api:8000
+      E2E_TIMEOUT: '15'
+    depends_on:
+      api:
+        condition: service_healthy
