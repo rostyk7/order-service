@@ -62,6 +62,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Clean up any leftover containers from previous attempts
+        run: docker compose -f docker-compose.e2e.yml down --volumes --remove-orphans || true
+
       - name: Run full-stack e2e tests
         run: |
           docker compose -f docker-compose.e2e.yml up \

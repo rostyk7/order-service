@@ -20,17 +20,26 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
 
-    op.execute(
-        "CREATE TYPE orderstatus AS ENUM "
-        "('PENDING','AWAITING_PAYMENT','PAID','FULFILLED','CANCELLED','PAYMENT_FAILED')"
-    )
-    op.execute(
-        "CREATE TYPE notificationstatus AS ENUM ('PENDING','SENT','FAILED')"
-    )
-    op.execute(
-        "CREATE TYPE notificationtype AS ENUM "
-        "('ORDER_CONFIRMED','PAYMENT_FAILED','ORDER_CANCELLED','ORDER_FULFILLED')"
-    )
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE orderstatus AS ENUM
+                ('PENDING','AWAITING_PAYMENT','PAID','FULFILLED','CANCELLED','PAYMENT_FAILED');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE notificationstatus AS ENUM ('PENDING','SENT','FAILED');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE notificationtype AS ENUM
+                ('ORDER_CONFIRMED','PAYMENT_FAILED','ORDER_CANCELLED','ORDER_FULFILLED');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
 
     op.create_table(
         "orders",
