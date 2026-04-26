@@ -263,23 +263,13 @@ All notifications are persisted in the `notifications` table with `PENDING → S
 
 ## Running Tests
 
-### Unit + integration tests (no Docker needed)
+### Unit tests (no Docker needed)
 
 Uses in-memory SQLite and mocked Redis/payment-provider — fast, no external dependencies.
 
 ```bash
 pip install -r requirements-dev.txt
 pytest tests/ --ignore=tests/e2e -v
-```
-
-### Docker-based tests (real Postgres + Redis)
-
-```bash
-docker compose -f docker-compose.test.yml up \
-  --build --abort-on-container-exit --exit-code-from test
-
-# tear down
-docker compose -f docker-compose.test.yml down --volumes
 ```
 
 ### Full end-to-end tests (real payment-provider from GHCR + real webhooks)
@@ -336,13 +326,10 @@ push / PR
 1. Unit Tests          — pytest, in-memory SQLite, no Docker
     │
     ▼
-2. E2E Tests           — docker-compose.test.yml (Postgres + Redis, mocked payment-provider)
-    │
-    ▼
-3. Full E2E Tests      — docker-compose.e2e.yml (real payment-provider from GHCR, real webhooks)
+2. Full E2E Tests      — docker-compose.e2e.yml (real payment-provider from GHCR, real webhooks)
     │
     ▼ (main branch only)
-4. Publish             — build + push to ghcr.io/rostyk7/order-service:latest
+3. Publish             — build + push to ghcr.io/rostyk7/order-service:latest
 ```
 
 After a successful publish the image is available at:
