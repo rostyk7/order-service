@@ -41,27 +41,30 @@ def upgrade() -> None:
         END $$;
     """)
 
+    # In SQLAlchemy 2.x, NamedType._on_table_create fires whenever self.metadata
+    # is None — create_type=False has no effect on that code path. Binding the
+    # enum instances to a dummy MetaData sets self.metadata, which suppresses the
+    # per-table DDL event and lets the DO blocks above remain the sole type creators.
+    _meta = sa.MetaData()
+    orderstatus = sa.Enum(
+        "PENDING", "AWAITING_PAYMENT", "PAID", "FULFILLED", "CANCELLED", "PAYMENT_FAILED",
+        name="orderstatus",
+        metadata=_meta,
+    )
+    notificationstatus = sa.Enum("PENDING", "SENT", "FAILED", name="notificationstatus", metadata=_meta)
+    notificationtype = sa.Enum(
+        "ORDER_CONFIRMED", "PAYMENT_FAILED", "ORDER_CANCELLED", "ORDER_FULFILLED",
+        name="notificationtype",
+        metadata=_meta,
+    )
+
     op.create_table(
         "orders",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("customer_email", sa.String(), nullable=False),
         sa.Column("amount", sa.Integer(), nullable=False),
         sa.Column("currency", sa.String(3), nullable=False, server_default="USD"),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "PENDING",
-                "AWAITING_PAYMENT",
-                "PAID",
-                "FULFILLED",
-                "CANCELLED",
-                "PAYMENT_FAILED",
-                name="orderstatus",
-                create_type=False,
-            ),
-            nullable=False,
-            server_default="PENDING",
-        ),
+        sa.Column("status", orderstatus, nullable=False, server_default="PENDING"),
         sa.Column("payment_id", sa.String(), nullable=True),
         sa.Column("card_token", sa.String(), nullable=False),
         sa.Column("metadata", postgresql.JSON(), nullable=False, server_default="{}"),
@@ -84,18 +87,8 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("order_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("orders.id"), nullable=False),
         sa.Column("event_type", sa.String(), nullable=False),
-        sa.Column(
-            "from_status",
-            sa.Enum("PENDING", "AWAITING_PAYMENT", "PAID", "FULFILLED", "CANCELLED", "PAYMENT_FAILED",
-                    name="orderstatus", create_type=False),
-            nullable=True,
-        ),
-        sa.Column(
-            "to_status",
-            sa.Enum("PENDING", "AWAITING_PAYMENT", "PAID", "FULFILLED", "CANCELLED", "PAYMENT_FAILED",
-                    name="orderstatus", create_type=False),
-            nullable=True,
-        ),
+        sa.Column("from_status", orderstatus, nullable=True),
+        sa.Column("to_status", orderstatus, nullable=True),
         sa.Column("payload", postgresql.JSON(), nullable=False, server_default="{}"),
         sa.Column(
             "created_at",
@@ -110,19 +103,9 @@ def upgrade() -> None:
         "notifications",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("order_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("orders.id"), nullable=False),
-        sa.Column(
-            "type",
-            sa.Enum("ORDER_CONFIRMED", "PAYMENT_FAILED", "ORDER_CANCELLED", "ORDER_FULFILLED",
-                    name="notificationtype", create_type=False),
-            nullable=False,
-        ),
+        sa.Column("type", notificationtype, nullable=False),
         sa.Column("recipient", sa.String(), nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum("PENDING", "SENT", "FAILED", name="notificationstatus", create_type=False),
-            nullable=False,
-            server_default="PENDING",
-        ),
+        sa.Column("status", notificationstatus, nullable=False, server_default="PENDING"),
         sa.Column("payload", postgresql.JSON(), nullable=False, server_default="{}"),
         sa.Column("error", sa.String(), nullable=True),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
