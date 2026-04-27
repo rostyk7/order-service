@@ -19,14 +19,16 @@ class OrderStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
     PAYMENT_FAILED = "PAYMENT_FAILED"
     REFUNDED = "REFUNDED"
+    REVIEW = "REVIEW"
 
 
 # Valid transitions: from_status -> set of allowed to_status
 ORDER_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
-    OrderStatus.PENDING: {OrderStatus.AWAITING_PAYMENT, OrderStatus.CANCELLED},
+    OrderStatus.PENDING: {OrderStatus.AWAITING_PAYMENT, OrderStatus.CANCELLED, OrderStatus.REVIEW},
     OrderStatus.AWAITING_PAYMENT: {OrderStatus.PAID, OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELLED},
     OrderStatus.PAYMENT_FAILED: {OrderStatus.AWAITING_PAYMENT, OrderStatus.CANCELLED},
     OrderStatus.PAID: {OrderStatus.FULFILLED, OrderStatus.CANCELLED, OrderStatus.REFUNDED},
+    OrderStatus.REVIEW: {OrderStatus.AWAITING_PAYMENT, OrderStatus.CANCELLED},
     OrderStatus.FULFILLED: set(),
     OrderStatus.CANCELLED: set(),
     OrderStatus.REFUNDED: set(),

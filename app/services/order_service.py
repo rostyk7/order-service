@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import uuid
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from arq import ArqRedis
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+from compliance_rules import CustomerHistory, ScreeningRequest, Verdict, screen
 
 from app.config import settings
 from app.models import (
@@ -85,24 +88,51 @@ async def _transition(
     db.add(event)
 
 
-async def create_order(
-    body: CreateOrderRequest,
-    db: AsyncSession,
-    redis: ArqRedis,
-    payment_client: PaymentClient,
-) -> Order:
-    order = Order(
-        customer_email=body.customer_email,
-        amount=body.amount,
-        currency=body.currency,
-        card_token=body.card_token,
-        metadata_=body.metadata,
+async def _screen_order(order: Order, db: AsyncSession) -> Verdict:
+    """Query history counts from DB and run compliance screening."""
+    now = datetime.now(tz=timezone.utc)
+
+    email_count = await db.scalar(
+        select(func.count(Order.id))
+        .where(Order.customer_email == order.customer_email)
+        .where(Order.created_at > now - timedelta(hours=1))
+        .where(Order.id != order.id)
     )
-    db.add(order)
-    await db.flush()  # get the UUID before calling payment-provider
 
+    card_email_count = await db.scalar(
+        select(func.count(func.distinct(Order.customer_email)))
+        .where(Order.card_token == order.card_token)
+        .where(Order.created_at > now - timedelta(hours=24))
+        .where(Order.id != order.id)
+    )
+
+    result = screen(
+        request=ScreeningRequest(
+            order_id=str(order.id),
+            customer_email=order.customer_email,
+            amount=order.amount,
+            currency=order.currency,
+            card_token=order.card_token,
+        ),
+        history=CustomerHistory(
+            email_orders_last_hour=email_count or 0,
+            card_distinct_emails_last_24h=card_email_count or 0,
+        ),
+    )
+
+    logger.info(
+        "Compliance screening for order %s: verdict=%s score=%d rules=%s",
+        order.id,
+        result.verdict,
+        result.risk_score,
+        result.rules_fired,
+    )
+    return result
+
+
+async def _initiate_payment(order: Order, db: AsyncSession, payment_client: PaymentClient) -> None:
+    """Call payment-provider and transition order to AWAITING_PAYMENT."""
     webhook_url = f"{settings.SELF_BASE_URL}/webhooks/payment"
-
     try:
         payment = await payment_client.create_payment(
             order_id=str(order.id),
@@ -113,11 +143,9 @@ async def create_order(
         )
     except PaymentProviderError as exc:
         logger.error("payment-provider error for order %s: %s", order.id, exc)
-        await db.rollback()
         raise HTTPException(status_code=502, detail=f"Payment provider error: {exc.detail}")
 
     order.payment_id = payment["id"]
-
     await _transition(
         order,
         OrderStatus.AWAITING_PAYMENT,
@@ -126,8 +154,84 @@ async def create_order(
         db,
     )
 
+
+async def create_order(
+    body: CreateOrderRequest,
+    db: AsyncSession,
+    payment_client: PaymentClient,
+) -> Order:
+    order = Order(
+        customer_email=body.customer_email,
+        amount=body.amount,
+        currency=body.currency,
+        card_token=body.card_token,
+        metadata_=body.metadata,
+    )
+    db.add(order)
+    await db.flush()  # get the UUID before screening / calling payment-provider
+
+    screening = await _screen_order(order, db)
+
+    if screening.verdict == Verdict.BLOCKED:
+        await db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Transaction blocked by compliance",
+                "rules_fired": screening.rules_fired,
+                "risk_score": screening.risk_score,
+            },
+        )
+
+    if screening.verdict == Verdict.FLAGGED:
+        await _transition(
+            order,
+            OrderStatus.REVIEW,
+            "compliance_flagged",
+            {"risk_score": screening.risk_score, "rules_fired": screening.rules_fired},
+            db,
+        )
+        await db.commit()
+        return await _fetch_order(order.id, db)
+
+    # CLEAR — proceed to payment-provider
+    await _initiate_payment(order, db, payment_client)
     await db.commit()
     return await _fetch_order(order.id, db)
+
+
+async def review_order(
+    order: Order,
+    decision: str,
+    note: str,
+    db: AsyncSession,
+    redis: ArqRedis,
+    payment_client: PaymentClient,
+) -> Order:
+    if order.status != OrderStatus.REVIEW:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot review an order in status {order.status}",
+        )
+
+    if decision == "APPROVE":
+        await _initiate_payment(order, db, payment_client)
+        db.add(OrderEvent(
+            order_id=order.id,
+            event_type="compliance_cleared",
+            payload={"note": note},
+        ))
+        await db.commit()
+        return await _fetch_order(order.id, db)
+
+    # REJECT
+    await _transition(order, OrderStatus.CANCELLED, "compliance_rejected", {"note": note}, db)
+    notif = _create_notification(order, NotificationType.ORDER_CANCELLED)
+    db.add(notif)
+    await db.commit()
+    order = await _fetch_order(order.id, db)
+    await redis.enqueue_job("send_notification", str(notif.id))
+    return order
 
 
 async def handle_payment_webhook(

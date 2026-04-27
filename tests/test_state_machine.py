@@ -17,10 +17,16 @@ from app.models import ORDER_TRANSITIONS, OrderStatus
         (OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELLED, True),
         (OrderStatus.PAID, OrderStatus.FULFILLED, True),
         (OrderStatus.PAID, OrderStatus.CANCELLED, True),
+        # Compliance REVIEW
+        (OrderStatus.PENDING, OrderStatus.REVIEW, True),
+        (OrderStatus.REVIEW, OrderStatus.AWAITING_PAYMENT, True),   # approved
+        (OrderStatus.REVIEW, OrderStatus.CANCELLED, True),           # rejected
+        (OrderStatus.REVIEW, OrderStatus.PAID, False),               # must go via AWAITING_PAYMENT
+        (OrderStatus.AWAITING_PAYMENT, OrderStatus.REVIEW, False),   # can't re-flag after payment
         # Refund
         (OrderStatus.PAID, OrderStatus.REFUNDED, True),
-        (OrderStatus.FULFILLED, OrderStatus.REFUNDED, False),  # too late
-        (OrderStatus.AWAITING_PAYMENT, OrderStatus.REFUNDED, False),  # not charged yet
+        (OrderStatus.FULFILLED, OrderStatus.REFUNDED, False),        # too late
+        (OrderStatus.AWAITING_PAYMENT, OrderStatus.REFUNDED, False), # not charged yet
         # Terminal states — nothing allowed
         (OrderStatus.FULFILLED, OrderStatus.CANCELLED, False),
         (OrderStatus.FULFILLED, OrderStatus.PAID, False),

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Merchant ID sent to payment-provider
     MERCHANT_ID: str = "order-service"
 
+    # Static key required on POST /orders/{id}/review — set a strong secret in production
+    ADMIN_API_KEY: str = "dev-admin-key"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

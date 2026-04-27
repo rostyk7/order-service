@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -37,6 +38,16 @@ class FulfillOrderRequest(BaseModel):
 
 class RefundOrderRequest(BaseModel):
     reason: str = "Customer request"
+
+
+class ReviewDecision(str, enum.Enum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
+class ReviewOrderRequest(BaseModel):
+    decision: ReviewDecision
+    note: str = ""
 
 
 # ── Responses ────────────────────────────────────────────────────────────────

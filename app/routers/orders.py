@@ -3,13 +3,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_redis
-from app.schemas import CreateOrderRequest, FulfillOrderRequest, OrderResponse, RefundOrderRequest
+from app.dependencies import require_admin
+from app.schemas import CreateOrderRequest, FulfillOrderRequest, OrderResponse, RefundOrderRequest, ReviewOrderRequest
 from app.services.order_service import (
     cancel_order,
     create_order,
     fulfill_order,
     get_order_or_404,
     refund_order,
+    review_order,
 )
 from app.services.payment_client import payment_client
 
@@ -20,10 +22,9 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 async def create(
     body: CreateOrderRequest,
     db: AsyncSession = Depends(get_db),
-    redis=Depends(get_redis),
 ):
     """Create an order and immediately submit a charge to payment-provider."""
-    return await create_order(body, db, redis, payment_client)
+    return await create_order(body, db, payment_client)
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
@@ -64,3 +65,15 @@ async def refund(
     """Refund a PAID order. Calls payment-provider to reverse the charge."""
     order = await get_order_or_404(order_id, db)
     return await refund_order(order, body.reason, db, redis, payment_client)
+
+
+@router.post("/{order_id}/review", response_model=OrderResponse, dependencies=[Depends(require_admin)])
+async def review(
+    order_id: str,
+    body: ReviewOrderRequest,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Approve or reject a compliance-flagged order. Requires X-Admin-Key header."""
+    order = await get_order_or_404(order_id, db)
+    return await review_order(order, body.decision, body.note, db, redis, payment_client)

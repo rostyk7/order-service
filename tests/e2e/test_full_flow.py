@@ -46,9 +46,15 @@ async def poll_for_status(
     )
 
 
-def order_payload(card_token: str, amount: int = 5000) -> dict:
+# tok_success tests share two rotating emails so card_distinct_emails_last_24h
+# stays at 2 (≤ threshold) and email_orders_last_hour never exceeds 3 (≤ threshold).
+_SA = "e2e-success-a@test.com"
+_SB = "e2e-success-b@test.com"
+
+
+def order_payload(card_token: str, amount: int = 5000, email: str | None = None) -> dict:
     return {
-        "customer_email": f"e2e-{uuid.uuid4().hex[:6]}@example.com",
+        "customer_email": email or f"e2e-{uuid.uuid4().hex[:6]}@example.com",
         "amount": amount,
         "currency": "USD",
         "card_token": card_token,
@@ -82,7 +88,7 @@ async def test_tok_success_full_flow(client: httpx.AsyncClient):
     Then fulfill the order.
     """
     # 1. Create order
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SA))
     assert resp.status_code == 202
     data = resp.json()
     order_id = data["id"]
@@ -109,7 +115,7 @@ async def test_tok_success_refund_flow(client: httpx.AsyncClient):
     """
     tok_success → PAID → refund → REFUNDED
     """
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SB))
     assert resp.status_code == 202
     order_id = resp.json()["id"]
 
@@ -192,7 +198,7 @@ async def test_retry_after_payment_failed(client: httpx.AsyncClient):
 @pytest.mark.asyncio
 async def test_cancel_before_payment(client: httpx.AsyncClient):
     """Cancel an order while it is still AWAITING_PAYMENT."""
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SA))
     assert resp.status_code == 202
     order_id = resp.json()["id"]
     assert resp.json()["status"] == "AWAITING_PAYMENT"
@@ -221,7 +227,7 @@ async def test_cancel_after_payment_failed(client: httpx.AsyncClient):
 @pytest.mark.asyncio
 async def test_cannot_refund_unfulfilled_order(client: httpx.AsyncClient):
     """FULFILLED → refund must be blocked."""
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SB))
     order_id = resp.json()["id"]
 
     await poll_for_status(client, order_id, "PAID")
@@ -234,7 +240,7 @@ async def test_cannot_refund_unfulfilled_order(client: httpx.AsyncClient):
 @pytest.mark.asyncio
 async def test_cannot_fulfill_before_paid(client: httpx.AsyncClient):
     """AWAITING_PAYMENT → fulfill must be blocked."""
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SA))
     order_id = resp.json()["id"]
 
     resp = await client.post(f"/orders/{order_id}/fulfill")
@@ -243,7 +249,7 @@ async def test_cannot_fulfill_before_paid(client: httpx.AsyncClient):
 
 @pytest.mark.asyncio
 async def test_duplicate_cancel_rejected(client: httpx.AsyncClient):
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SB))
     order_id = resp.json()["id"]
 
     await client.post(f"/orders/{order_id}/cancel")
@@ -262,7 +268,7 @@ async def test_get_nonexistent_order_returns_404(client: httpx.AsyncClient):
 @pytest.mark.asyncio
 async def test_event_log_records_full_history(client: httpx.AsyncClient):
     """Verify the immutable event log captures every transition."""
-    resp = await client.post("/orders", json=order_payload("tok_success"))
+    resp = await client.post("/orders", json=order_payload("tok_success", email=_SA))
     order_id = resp.json()["id"]
 
     data = await poll_for_status(client, order_id, "PAID")

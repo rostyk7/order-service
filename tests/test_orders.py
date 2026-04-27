@@ -29,7 +29,7 @@ async def test_create_order_success(client: AsyncClient):
             "/orders",
             json={
                 "customer_email": "buyer@example.com",
-                "amount": 9900,
+                "amount": 9900,  # well under $10k — passes compliance
                 "currency": "USD",
                 "card_token": "tok_success",
             },
@@ -41,8 +41,69 @@ async def test_create_order_success(client: AsyncClient):
     assert data["payment_id"] == "pay_123"
     assert data["amount"] == 9900
     assert data["customer_email"] == "buyer@example.com"
-    # An event should have been appended
     assert any(e["event_type"] == "payment_initiated" for e in data["events"])
+
+
+@pytest.mark.asyncio
+async def test_create_order_compliance_blocked(client: AsyncClient):
+    # card_sharing fires when card_distinct_emails_last_24h > 2 (score=50 → BLOCKED).
+    # Create 3 orders with different emails on the same card to set up history.
+    card = "tok_card_shared"
+    mock_payment = {"id": "pay_setup", "status": "PENDING"}
+    for email in ["a@shared.com", "b@shared.com", "c@shared.com"]:
+        with patch(
+            "app.services.order_service.PaymentClient.create_payment",
+            new_callable=AsyncMock,
+            return_value=mock_payment,
+        ):
+            await client.post(
+                "/orders",
+                json={"customer_email": email, "amount": 5000, "currency": "USD", "card_token": card},
+            )
+
+    # 4th order with the same card — 3 distinct prior emails triggers card_sharing → BLOCKED
+    response = await client.post(
+        "/orders",
+        json={
+            "customer_email": "d@shared.com",
+            "amount": 5000,
+            "currency": "USD",
+            "card_token": card,
+        },
+    )
+    assert response.status_code == 422
+    assert "blocked" in response.json()["detail"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_create_order_compliance_flagged(client: AsyncClient):
+    response = await client.post(
+        "/orders",
+        json={
+            "customer_email": "buyer@example.com",
+            "amount": 990_000,  # $9,900 — triggers structuring → FLAGGED
+            "currency": "USD",
+            "card_token": "tok_success",
+        },
+    )
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "REVIEW"
+    assert any(e["event_type"] == "compliance_flagged" for e in data["events"])
+
+
+@pytest.mark.asyncio
+async def test_create_order_sanctioned_currency_blocked(client: AsyncClient):
+    response = await client.post(
+        "/orders",
+        json={
+            "customer_email": "buyer@example.com",
+            "amount": 5000,
+            "currency": "IRR",  # sanctioned → BLOCKED
+            "card_token": "tok_success",
+        },
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
