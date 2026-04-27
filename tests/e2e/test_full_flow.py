@@ -1,14 +1,3 @@
-"""
-End-to-end tests — full stack running (payment-provider + order-service).
-
-These tests hit the real API over HTTP. The stack is started via
-docker-compose.e2e.yml before the suite runs.
-
-Environment:
-  API_BASE_URL   Base URL for the order-service API (default: http://localhost:8000)
-  E2E_TIMEOUT    Seconds to wait for async state changes    (default: 15)
-"""
-
 from __future__ import annotations
 
 import asyncio
