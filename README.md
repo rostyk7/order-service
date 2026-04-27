@@ -11,6 +11,12 @@ Client
 ┌──────────────────────┐
 │   Orders Router      │  ← validates request, creates order (PENDING)
 └──────────┬───────────┘
+           │  AML screening (compliance-rules library)
+           ▼
+┌──────────────────────┐
+│  Compliance Gate     │  BLOCKED  → 422, order rolled back
+│  (pre-payment)       │  FLAGGED  → order → REVIEW (no payment initiated)
+└──────────┬───────────┘  CLEAR    → proceed to payment
            │  POST /payments  (httpx, idempotency key = order-{id})
            ▼
 ┌──────────────────────┐
@@ -30,6 +36,10 @@ Client
 └──────────────────────┘
 ```
 
+REVIEW orders sit until an analyst acts via `POST /orders/{id}/review`:
+- **APPROVE** → payment is submitted, order enters the normal webhook flow
+- **REJECT** → order transitions to `CANCELLED`, cancellation notification enqueued
+
 ### Service isolation
 
 Each service owns its infrastructure completely — no shared databases or queues:
@@ -47,44 +57,47 @@ They communicate only via HTTP (order-service calls payment-provider) and webhoo
                  ┌─────────┐
                  │ PENDING │ ─────────────────────────────────────┐
                  └────┬────┘                                      │
-                      │ payment submitted                         │
-                      ▼                                           │
-          ┌───────────────────────┐                               │
-          │   AWAITING_PAYMENT    │ ──────────────────────┐       │
-          └──────────┬────────────┘                       │       │
-          ┌──────────┴──────────┐                         │       │
- settled  │                     │ failed                  │       │ cancelled
-          ▼                     ▼                         │       │
-       ┌──────┐         ┌────────────────┐                │       │
-       │ PAID │         │ PAYMENT_FAILED │ ─────────┐     │       │
-       └──┬───┘         └───────┬────────┘          │     │       │
-          │                     │ retry              │     │       │
-          │                     └──────────────────► │     │       │
-          │                                          ▼     ▼       ▼
-          │                                     ┌───────────────────┐
-          │ refund                               │    CANCELLED      │ ◄── terminal
-          ▼                                     └───────────────────┘
-    ┌──────────┐
-    │ REFUNDED │ ◄── terminal
-    └──────────┘
-          ▲
-          │ fulfilled
-    ┌───────────┐
-    │ FULFILLED │ ◄── terminal  (cannot be refunded — goods already shipped)
-    └───────────┘
+                      │ compliance screening                      │
+             ┌────────┴────────┐                                  │
+    FLAGGED  │                 │ CLEAR                            │
+             ▼                 │ payment submitted                │
+          ┌────────┐           ▼                                  │
+          │ REVIEW │  ┌───────────────────────┐                   │
+          └───┬────┘  │   AWAITING_PAYMENT    │ ────────────┐     │
+     approve  │       └──────────┬────────────┘             │     │
+              └──────────────────┘      │ failed            │     │ cancelled
+                                        ▼                   │     │
+                               ┌────────────────┐           │     │
+              REJECT ──────────► PAYMENT_FAILED │ ──────┐   │     │
+              (from REVIEW)    └───────┬────────┘       │   │     │
+                                       │ retry          │   │     │
+                                       └──────────────► │   │     │
+                                                        ▼   ▼     ▼
+       ┌──────┐                                    ┌───────────────────┐
+       │ PAID │                                    │    CANCELLED      │ ◄── terminal
+       └──┬───┘  settled                           └───────────────────┘
+          │
+          ├─ refund ──► ┌──────────┐
+          │             │ REFUNDED │ ◄── terminal
+          │             └──────────┘
+          │
+          └─ fulfilled ► ┌───────────┐
+                         │ FULFILLED │ ◄── terminal  (cannot be refunded)
+                         └───────────┘
 ```
 
 ### Valid transitions at a glance
 
-| From | Allowed next states |
-|---|---|
-| `PENDING` | `AWAITING_PAYMENT`, `CANCELLED` |
-| `AWAITING_PAYMENT` | `PAID`, `PAYMENT_FAILED` |
-| `PAYMENT_FAILED` | `AWAITING_PAYMENT` (retry), `CANCELLED` |
-| `PAID` | `FULFILLED`, `REFUNDED`, `CANCELLED` |
-| `FULFILLED` | — terminal |
-| `CANCELLED` | — terminal |
-| `REFUNDED` | — terminal |
+| From | Allowed next states | Trigger |
+|---|---|---|
+| `PENDING` | `AWAITING_PAYMENT`, `REVIEW`, `CANCELLED` | compliance screening on order creation |
+| `REVIEW` | `AWAITING_PAYMENT`, `CANCELLED` | analyst approve / reject via `POST /{id}/review` |
+| `AWAITING_PAYMENT` | `PAID`, `PAYMENT_FAILED`, `CANCELLED` | payment-provider webhook |
+| `PAYMENT_FAILED` | `AWAITING_PAYMENT` (retry), `CANCELLED` | — |
+| `PAID` | `FULFILLED`, `REFUNDED`, `CANCELLED` | — |
+| `FULFILLED` | — terminal | — |
+| `CANCELLED` | — terminal | — |
+| `REFUNDED` | — terminal | — |
 
 Any attempt to make an invalid transition returns `409 Conflict`.
 
@@ -140,7 +153,13 @@ Content-Type: application/json
 }
 ```
 
-Response `202 Accepted` — order is immediately `AWAITING_PAYMENT`. Payment processing is async; the final status (`PAID` or `PAYMENT_FAILED`) arrives via webhook from payment-provider.
+Response `202 Accepted`. The order status in the response depends on the compliance screening result:
+
+| Compliance verdict | Response status | Payment initiated |
+|---|---|---|
+| `CLEAR` | `AWAITING_PAYMENT` | Yes — webhook delivers final outcome |
+| `FLAGGED` | `REVIEW` | No — awaits analyst decision |
+| `BLOCKED` | `422 Unprocessable Entity` | No — order rolled back, never persisted |
 
 **Card tokens** — forwarded to payment-provider's mock bank for deterministic outcomes:
 
@@ -152,6 +171,18 @@ Response `202 Accepted` — order is immediately `AWAITING_PAYMENT`. Payment pro
 | `tok_do_not_honor` | failed | `PAYMENT_FAILED` |
 
 Any unrecognised token falls back to random behaviour governed by `MOCK_FAILURE_RATE` on the payment-provider side.
+
+**Compliance rules** that can override the above:
+
+| Rule | Condition | Verdict |
+|---|---|---|
+| `currency_blacklist` | sanctioned currency (IRR, KPW, SYP, CUC) | BLOCKED (score 100) |
+| `amount_threshold` | single transaction > $10,000 | FLAGGED (score 40) |
+| `structuring` | amount in $9,000–$9,999.99 band | FLAGGED (score 35) |
+| `email_velocity` | > 3 orders from same email in 1 hour | FLAGGED (score 30) |
+| `card_sharing` | same card across > 2 distinct emails in 24 h | BLOCKED (score 50) |
+
+Scores are summed (capped at 100). Total ≥ 50 → BLOCKED; 1–49 → FLAGGED; 0 → CLEAR.
 
 ---
 
@@ -218,6 +249,25 @@ Valid from `PAID` only. Calls `POST /payments/:id/refund` on payment-provider to
 **Cannot refund** a `FULFILLED` order — the state machine blocks this with `409`. Refunds must be requested before fulfillment.
 
 A `payment.refunded` webhook from payment-provider also drives the order to `REFUNDED` independently — covers cases where a refund is initiated directly on the payment-provider side (e.g. by a support team).
+
+---
+
+### Review Order (compliance)
+
+```bash
+POST /orders/{id}/review
+X-Admin-Key: <ADMIN_API_KEY>
+Content-Type: application/json
+
+{ "decision": "APPROVE", "note": "Verified — legitimate bulk purchase" }
+```
+
+Valid only when the order is in `REVIEW` status. Requires the `X-Admin-Key` header; missing header → `422`, wrong value → `403`.
+
+| Decision | Effect |
+|---|---|
+| `APPROVE` | Submits charge to payment-provider → order transitions to `AWAITING_PAYMENT`. Webhook flow takes over from here. |
+| `REJECT` | Order transitions to `CANCELLED`. `ORDER_CANCELLED` notification enqueued. |
 
 ---
 
@@ -302,6 +352,8 @@ API_BASE_URL=http://localhost:8000 pytest tests/e2e/ -v
 
 ### E2E test coverage
 
+**Payment flow** (`tests/e2e/test_full_flow.py`):
+
 | Test | Scenario |
 |---|---|
 | `test_tok_success_full_flow` | create → webhook → `PAID` → `FULFILLED` |
@@ -316,6 +368,16 @@ API_BASE_URL=http://localhost:8000 pytest tests/e2e/ -v
 | `test_duplicate_cancel_rejected` | second cancel → `409` |
 | `test_get_nonexistent_order_returns_404` | unknown ID → `404` |
 | `test_event_log_records_full_history` | all events present, ordered chronologically |
+
+**Compliance gate** (`tests/e2e/test_compliance_flow.py`):
+
+| Test | Scenario |
+|---|---|
+| `test_compliance_blocked_currency` | sanctioned currency → `422`, order never persisted |
+| `test_compliance_review_approve_full_flow` | structuring amount → `REVIEW` → approve → `AWAITING_PAYMENT` → `PAID` |
+| `test_compliance_review_reject` | structuring amount → `REVIEW` → reject → `CANCELLED`; second review → `409` |
+| `test_compliance_admin_missing_key` | review without `X-Admin-Key` → `422` |
+| `test_compliance_admin_wrong_key` | review with wrong key → `403` |
 
 ## CI/CD Pipeline
 
@@ -339,6 +401,8 @@ docker pull ghcr.io/rostyk7/order-service:sha-<commit>
 ```
 
 ## Key Design Decisions
+
+**Compliance screening as a pre-payment gate** — AML rules run synchronously inside `create_order()` after the order row is flushed but before any call to payment-provider. BLOCKED orders are rolled back entirely (no DB record). FLAGGED orders are committed in `REVIEW` status; payment is withheld until an analyst acts. This mirrors real fintech practice: AML screening must complete before a charge is authorised, and a FLAGGED order must leave an audit trail regardless of the eventual decision.
 
 **Idempotent webhook handler** — the webhook endpoint catches 409s from the state machine and still returns 200. payment-provider retries on non-2xx; swallowing the conflict stops infinite retries on duplicate deliveries.
 
@@ -374,3 +438,4 @@ docker pull ghcr.io/rostyk7/order-service:sha-<commit>
 | `PAYMENT_PROVIDER_URL` | `http://localhost:3000` | payment-provider base URL |
 | `SELF_BASE_URL` | `http://localhost:8000` | This service's public URL — used as the webhook callback URL when submitting charges to payment-provider. Must be reachable by payment-provider (set to `http://api:8000` in docker environments) |
 | `MERCHANT_ID` | `order-service` | Merchant identifier sent to payment-provider |
+| `ADMIN_API_KEY` | `dev-admin-key` | Secret required on `POST /orders/{id}/review`. Set a strong value in production. |
