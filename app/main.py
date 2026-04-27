@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.dependencies import set_redis_pool
@@ -34,6 +35,13 @@ app = FastAPI(
     description="Event-driven order processing backed by payment-provider",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3001"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(orders.router)

@@ -73,6 +73,24 @@ class NotificationResponse(BaseModel):
     created_at: datetime
 
 
+class OrderSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    customer_email: str
+    amount: int
+    currency: str
+    status: OrderStatus
+    payment_id: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrderListResponse(BaseModel):
+    orders: list[OrderSummaryResponse]
+    total: int
+
+
 class OrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

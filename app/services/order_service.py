@@ -49,6 +49,22 @@ async def _fetch_order(order_id: uuid.UUID, db: AsyncSession) -> Order:
     return result.scalar_one()
 
 
+async def list_orders(
+    db: AsyncSession,
+    status: OrderStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[Order], int]:
+    q = select(Order).order_by(Order.created_at.desc())
+    count_q = select(func.count(Order.id))
+    if status is not None:
+        q = q.where(Order.status == status)
+        count_q = count_q.where(Order.status == status)
+    total = await db.scalar(count_q) or 0
+    result = await db.execute(q.limit(limit).offset(offset))
+    return list(result.scalars().all()), total
+
+
 async def get_order_or_404(order_id: str, db: AsyncSession) -> Order:
     result = await db.execute(
         select(Order)

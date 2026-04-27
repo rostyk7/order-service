@@ -1,21 +1,43 @@
-from fastapi import APIRouter, Depends, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_redis
 from app.dependencies import require_admin
-from app.schemas import CreateOrderRequest, FulfillOrderRequest, OrderResponse, RefundOrderRequest, ReviewOrderRequest
+from app.models import OrderStatus
+from app.schemas import (
+    CreateOrderRequest,
+    FulfillOrderRequest,
+    OrderListResponse,
+    OrderResponse,
+    RefundOrderRequest,
+    ReviewOrderRequest,
+)
 from app.services.order_service import (
     cancel_order,
     create_order,
     fulfill_order,
     get_order_or_404,
+    list_orders,
     refund_order,
     review_order,
 )
 from app.services.payment_client import payment_client
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get("", response_model=OrderListResponse)
+async def list(
+    order_status: Optional[OrderStatus] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    orders, total = await list_orders(db, status=order_status, limit=limit, offset=offset)
+    return OrderListResponse(orders=orders, total=total)
 
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_202_ACCEPTED)
