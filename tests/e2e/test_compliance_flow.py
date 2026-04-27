@@ -1,53 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import os
 import uuid
 
 import httpx
 import pytest
-import pytest_asyncio
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-E2E_TIMEOUT = int(os.getenv("E2E_TIMEOUT", "15"))
-ADMIN_KEY = os.getenv("ADMIN_API_KEY", "dev-admin-key")
-
-# Shared with test_full_flow.py — must match exactly (same DB, same 24 h window).
-_SA = "e2e-success-a@test.com"
-_SB = "e2e-success-b@test.com"
-
-# Emails for fake-card (tok_test) compliance orders — never touch full_flow card tokens.
-_CTA = "e2e-comp-a@test.com"
-_CTB = "e2e-comp-b@test.com"
-
-# Amounts in cents: 950 000 is inside the structuring band [900 000, 999 999] → score 35 → FLAGGED.
-STRUCTURING_AMOUNT = 950_000
-
-
-async def poll_for_status(
-    client: httpx.AsyncClient,
-    order_id: str,
-    expected: str,
-    timeout: int = E2E_TIMEOUT,
-) -> dict:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        resp = await client.get(f"/orders/{order_id}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data["status"] == expected:
-            return data
-        await asyncio.sleep(0.5)
-    raise TimeoutError(
-        f"Order {order_id} did not reach {expected!r} within {timeout}s. "
-        f"Last status: {data['status']!r}"
-    )
-
-
-@pytest_asyncio.fixture
-async def client():
-    async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=10.0) as c:
-        yield c
+from tests.e2e.constants import ADMIN_KEY, STRUCTURING_AMOUNT, _CTA, _CTB, _SB
+from tests.e2e.helpers import poll_for_status
 
 
 # ── BLOCKED ───────────────────────────────────────────────────────────────────

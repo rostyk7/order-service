@@ -1,44 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import os
 import uuid
 
 import httpx
 import pytest
-import pytest_asyncio
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-E2E_TIMEOUT = int(os.getenv("E2E_TIMEOUT", "15"))
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def poll_for_status(
-    client: httpx.AsyncClient,
-    order_id: str,
-    expected: str,
-    timeout: int = E2E_TIMEOUT,
-) -> dict:
-    """Poll GET /orders/{id} until status matches or timeout is reached."""
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        resp = await client.get(f"/orders/{order_id}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data["status"] == expected:
-            return data
-        await asyncio.sleep(0.5)
-    raise TimeoutError(
-        f"Order {order_id} did not reach {expected!r} within {timeout}s. "
-        f"Last status: {data['status']!r}"
-    )
-
-
-# tok_success tests share two rotating emails so card_distinct_emails_last_24h
-# stays at 2 (≤ threshold) and email_orders_last_hour never exceeds 3 (≤ threshold).
-_SA = "e2e-success-a@test.com"
-_SB = "e2e-success-b@test.com"
+from tests.e2e.constants import _SA, _SB
+from tests.e2e.helpers import poll_for_status
 
 
 def order_payload(card_token: str, amount: int = 5000, email: str | None = None) -> dict:
@@ -49,14 +17,6 @@ def order_payload(card_token: str, amount: int = 5000, email: str | None = None)
         "card_token": card_token,
         "metadata": {"test": True},
     }
-
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-@pytest_asyncio.fixture
-async def client():
-    async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=10.0) as c:
-        yield c
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
